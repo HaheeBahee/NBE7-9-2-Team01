@@ -43,46 +43,18 @@ public final class DiaryCardAssembler {
     }
 
     /**
-     * 단일 카드 변환 (친구/전체 다이어리용)
-     */
-    public static DiaryPostCardRes toDiaryCard(
-            DiaryPost post,
-            boolean liked,
-            long likeCount,
-            long commentCount
-    ) {
-        String preview = DiaryPreviewMapper.buildPreviewText(post.getContent(), PREVIEW_MAX);
-        String thumbnail = DiaryPreviewMapper.firstImageUrl(post);
-
-        return new DiaryPostCardRes(
-                post.getId(),
-                post.getUser().getId(),
-                post.getUser().getNickname(),
-                post.getTitle(),
-                preview,
-                thumbnail,
-                post.getMoodEmoji(),
-                post.getVisibility(),
-                post.getCreatedAt().toLocalDate(),
-                liked,
-                likeCount,
-                commentCount
-        );
-    }
-
-    /**
      * 여러 게시글을 한 번에 DTO 리스트로 변환 (PostViewStats와 함께)
      */
     public static List<DiaryPostCardRes> toCards(
             List<DiaryPost> posts,
             Set<Long> likedSet,
             Map<Long, Long> likeCnt,
-            Map<Long, Long> cmtCnt
+            Map<Long, Long> commentCnt
     ) {
         return posts.stream()
                 .map(p -> DiaryPostCardRes.from(
                         p,
-                        PostViewStats.of(likedSet, likeCnt, cmtCnt, p.getId())
+                        PostViewStats.of(likedSet, likeCnt, commentCnt, p.getId())
                 ))
                 .toList();
     }

@@ -5,7 +5,7 @@ import { Header } from "@/components/header"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { ChevronLeft, ChevronRight, TrendingUp } from "lucide-react"
-import { DiaryDetailDialog } from "@/components/diary-detail-dialog"
+import DiaryDetailDialog from "@/components/diary-detail-dialog";
 
 const emotionData = {
   "2025-01-01": { emoji: "😊", label: "행복해요", missions: 3 },

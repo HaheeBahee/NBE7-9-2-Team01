@@ -11,7 +11,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { DiaryDetailDialog } from "@/components/diaryEntry-detail-dialog"
+import DiaryDetailDialog from "@/components/diary-detail-dialog";
 import { CommunityDetailDialog } from "@/components/community-detail-dialog"
 import { MessageCircle, Sparkles, Bookmark, Settings, Heart, MessageSquare, Upload, Trash2 } from "lucide-react"
 import Link from "next/link"
@@ -174,7 +174,7 @@ export default function ProfilePage() {
               )}
             </div>
             <div className="grid grid-cols-4 gap-4 text-center">
-              <Link href="/diaryEntry">
+              <Link href="/diary-posts">
                 <div className="cursor-pointer hover:opacity-80 transition-opacity">
                   <p className="text-2xl font-bold">42</p>
                   <p className="text-sm text-muted-foreground">다이어리</p>

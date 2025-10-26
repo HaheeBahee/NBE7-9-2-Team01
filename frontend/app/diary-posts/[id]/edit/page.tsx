@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 
 import { Header } from "@/components/header";
 import { Button } from "@/components/ui/button";
@@ -40,12 +40,39 @@ const toServerPath = (u: string) => {
     }
 };
 
-/* ----------------------------- 페이지: 새 글 ----------------------------- */
+const toFEVisibility = (v?: string): VisibilityFE =>
+    v === "PUBLIC" ? "public" : v === "FRIEND" ? "friend" : "private";
 
-export default function NewDiaryPage() {
+const toBEVisibility = (v: VisibilityFE) =>
+    v === "friend" ? "FRIEND" : v.toUpperCase();
+
+function readSeed(id: string) {
+    if (typeof window === "undefined") return null;
+    try {
+        const raw = sessionStorage.getItem("povi.edit.seed");
+        if (!raw) return null;
+        const seed = JSON.parse(raw);
+        if (!seed || String(seed.id) !== String(id)) return null;
+        return seed as {
+            id: number;
+            title?: string;
+            content?: string;
+            visibility?: VisibilityFE | string;
+            imageUrls?: string[];
+            moodEmoji?: string;
+        };
+    } catch {
+        return null;
+    }
+}
+
+/* ----------------------------- 페이지 ----------------------------- */
+
+export default function DiaryEditPage() {
+    const { id } = useParams<{ id: string }>();
     const router = useRouter();
 
-    // 감정 옵션
+    // 1) 감정 옵션
     const [moods, setMoods] = useState<MoodOption[]>([]);
     useEffect(() => {
         (async () => {
@@ -63,25 +90,72 @@ export default function NewDiaryPage() {
         return { emoji: emoji || "🙂", text: text ?? label };
     };
 
-    // 폼 상태(빈 값으로 시작)
-    const [selectedMoodCode, setSelectedMoodCode] = useState<string>("");
-    const [title, setTitle] = useState<string>("");
-    const [content, setContent] = useState<string>("");
-    const [images, setImages] = useState<string[]>([]);
-    const [visibility, setVisibility] = useState<VisibilityFE>("private");
+    // 2) seed 우선 채우기
+    const seed = useMemo(
+        () => (typeof window !== "undefined" ? readSeed(String(id)) : null),
+        [id]
+    );
+
+    // 3) 폼 상태
+    const [selectedMoodCode, setSelectedMoodCode] = useState<string>(
+        seed?.moodEmoji ?? ""
+    );
+    const [title, setTitle] = useState<string>(seed?.title ?? "");
+    const [content, setContent] = useState<string>(seed?.content ?? "");
+    const [images, setImages] = useState<string[]>(
+        Array.isArray(seed?.imageUrls) ? seed!.imageUrls!.map(toAbsUrl) : []
+    );
+    const [visibility, setVisibility] = useState<VisibilityFE>(
+        seed?.visibility ? toFEVisibility(seed.visibility as string) : "private"
+    );
 
     const [uploading, setUploading] = useState(false);
     const [submitting, setSubmitting] = useState(false);
+    const [loading, setLoading] = useState(!seed); // seed 없을 때만 로딩 스피너
+    const [error, setError] = useState<string | null>(null);
 
     const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+    // 4) 실제 서버에서 상세 조회로 보정
+    useEffect(() => {
+        let cancel = false;
+        (async () => {
+            try {
+                const { data } = await api.get(`/diary-posts/${id}`);
+                if (cancel) return;
+
+                setTitle(data.title ?? "");
+                setContent(data.content ?? "");
+                setVisibility(toFEVisibility(data.visibility));
+                setSelectedMoodCode(data.moodEmoji ?? "");
+                setImages(
+                    Array.isArray(data.imageUrls) ? data.imageUrls.map(toAbsUrl) : []
+                );
+                try {
+                    sessionStorage.removeItem("povi.edit.seed");
+                } catch {}
+            } catch (e: any) {
+                if (!seed)
+                    setError(e?.response?.data?.message ?? "게시글을 불러오지 못했습니다.");
+            } finally {
+                setLoading(false);
+            }
+        })();
+
+        return () => {
+            cancel = true;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id]);
+
+    // 5) 제출 가능 여부
     const canSubmit =
         !submitting &&
         (selectedMoodCode?.length ?? 0) > 0 &&
         title.trim().length >= TITLE_MIN &&
         content.trim().length >= CONTENT_MIN;
 
-    // 이미지 업로드/삭제
+    // 6) 이미지 업로드/삭제
     const openPicker = () => fileInputRef.current?.click();
 
     const handleFiles = async (files: FileList | null | undefined): Promise<void> => {
@@ -113,12 +187,11 @@ export default function NewDiaryPage() {
         try {
             await api.delete("/diary-images", { params: { imageUrl: toServerPath(url) } });
         } catch {
-            /* 서버 삭제 실패는 무시 */
         }
     };
 
-    // 저장(POST)
-    const onCreate = async () => {
+    // 7) 저장(PATCH)
+    const onSave = async () => {
         if (!canSubmit) {
             alert("감정, 제목, 내용을 최소 2자 이상 입력해주세요.");
             return;
@@ -127,21 +200,24 @@ export default function NewDiaryPage() {
         try {
             const payload = {
                 title: title.trim(),
-                content,
+                content: content.trim(),
                 moodEmoji: selectedMoodCode,
-                visibility: visibility === "friend" ? "FRIEND" : visibility.toUpperCase(),
-                imageUrls: images, // 0장도 허용
+                visibility: toBEVisibility(visibility),
+                imageUrls: images,
             };
 
-            await api.post("/diary-posts", payload);
-            alert("다이어리가 생성되었습니다.");
-            router.push("/diary-posts");
+            await api.patch(`/diary-posts/${id}`, payload);
+            alert("수정되었습니다.");
+            router.replace("/diary-posts");
         } catch (e: any) {
-            alert(e?.response?.data?.message ?? "생성에 실패했습니다.");
+            alert(e?.response?.data?.message ?? "수정에 실패했습니다.");
         } finally {
             setSubmitting(false);
         }
     };
+
+    if (loading) return <div className="container max-w-4xl py-10">불러오는 중…</div>;
+    if (error) return <div className="container max-w-4xl py-10 text-red-600">{error}</div>;
 
     /* ----------------------------- 렌더 ----------------------------- */
     return (
@@ -150,16 +226,16 @@ export default function NewDiaryPage() {
             <main className="container py-8 md:py-12 max-w-4xl">
                 <div className="mb-8">
                     <Link href="/diary-posts" className="text-sm text-muted-foreground hover:text-foreground">
-                        ← 목록으로
+                        ← 돌아가기
                     </Link>
                 </div>
 
                 <div className="space-y-8">
                     <div>
-                        <h1 className="text-3xl font-bold mb-2">오늘의 다이어리</h1>
+                        <h1 className="text-3xl font-bold mb-2">다이어리 수정</h1>
                     </div>
 
-                    {/* 감정 선택 */}
+                    {/* 감정 선택 (작성 페이지와 동일 UI) */}
                     <Card className="p-6">
                         <Label className="text-lg font-semibold mb-4 block">지금 기분이 어떠신가요?</Label>
                         <div className="grid grid-cols-4 md:grid-cols-8 gap-3">
@@ -258,7 +334,10 @@ export default function NewDiaryPage() {
                     {/* 공개 범위 */}
                     <Card className="p-6">
                         <Label className="text-lg font-semibold mb-4 block">공개 범위</Label>
-                        <RadioGroup value={visibility} onValueChange={(v) => setVisibility(v as VisibilityFE)}>
+                        <RadioGroup
+                            value={visibility}
+                            onValueChange={(v) => setVisibility(v as VisibilityFE)}
+                        >
                             <div className="flex items-center space-x-2">
                                 <RadioGroupItem value="public" id="public" />
                                 <Label htmlFor="public" className="font-normal cursor-pointer">전체 공개</Label>
@@ -274,10 +353,10 @@ export default function NewDiaryPage() {
                         </RadioGroup>
                     </Card>
 
-                    {/* 작성/취소 */}
+                    {/* 저장/취소 */}
                     <div className="flex gap-4">
-                        <Button size="lg" className="flex-1" onClick={onCreate} disabled={!canSubmit}>
-                            {submitting ? "작성 중..." : "작성 완료"}
+                        <Button size="lg" className="flex-1" onClick={onSave} disabled={!canSubmit}>
+                            {submitting ? "저장 중..." : "저장"}
                         </Button>
                         <Button size="lg" variant="outline" asChild>
                             <Link href="/diary-posts">취소</Link>

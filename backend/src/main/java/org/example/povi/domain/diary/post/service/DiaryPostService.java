@@ -2,7 +2,6 @@ package org.example.povi.domain.diary.post.service;
 
 import lombok.RequiredArgsConstructor;
 import org.example.povi.domain.diary.comment.repository.DiaryCommentRepository;
-import org.example.povi.domain.diary.enums.MoodEmoji;
 import org.example.povi.domain.diary.enums.Visibility;
 import org.example.povi.domain.diary.like.repository.DiaryPostLikeRepository;
 import org.example.povi.domain.diary.post.dto.request.DiaryPostCreateReq;
@@ -18,13 +17,18 @@ import org.example.povi.domain.diary.post.repository.DiaryPostRepository;
 import org.example.povi.domain.user.entity.User;
 import org.example.povi.domain.user.follow.service.FollowService;
 import org.example.povi.domain.user.repository.UserRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.temporal.TemporalAdjusters;
 import java.util.*;
 
 @Service
@@ -80,59 +84,90 @@ public class DiaryPostService {
     }
 
     /**
-     * 내 다이어리 목록 + 주간 통계(월~일) (로그인)
+     * 내 다이어리: 월별 카드(페이징) + 이번 주 통계
      */
     @Transactional(readOnly = true)
-    public MyDiaryListRes getMyDiaryPostsWithWeeklyStats(Long currentUserId) {
+    public MyDiaryListRes getMyDiaryPostsWithMonthlyFilter(
+            Integer year,
+            Integer month,
+            Pageable pageable,
+            Long currentUserId
+    ) {
         requireLogin(currentUserId);
 
-        List<DiaryPost> myPosts = diaryPostRepository.findByUserIdOrderByCreatedAtDesc(currentUserId);
-        if (myPosts.isEmpty()) {
-            return new MyDiaryListRes(0, 0, new MoodSummaryRes(0.0, MoodEmoji.fromValence(0.0)), List.of());
-        }
+        // 기준일 계산 (파라미터 없으면 오늘 기준)
+        LocalDate today = LocalDate.now();
+        int y = (year == null) ? today.getYear() : year;
+        int m = (month == null) ? today.getMonthValue() : month;
 
-        List<Long> postIds = myPosts.stream().map(DiaryPost::getId).toList();
-        Map<Long, Long> commentCnt = DiaryQueryMapper.toCountMap(diaryCommentRepository.countByPostIds(postIds));
-        Map<Long, Long> likeCnt = DiaryQueryMapper.toCountMap(diaryPostLikeRepository.countByPostIds(postIds));
-        Set<Long> likedSet = new HashSet<>(diaryPostLikeRepository.findPostIdsLikedByUser(postIds, currentUserId));
+        // 월별 경계 [YYYY-MM-01 00:00, 다음달 1일 00:00)
+        LocalDateTime startOfMonth = LocalDate.of(y, m, 1).atStartOfDay();
+        LocalDateTime startOfNextMonth = startOfMonth.plusMonths(1);
 
-        return MyDiaryAssembler.build(myPosts, likedSet, likeCnt, commentCnt, LocalDate.now());
+        // 이번 주 경계 [이번주 월요일 00:00, 다음주 월요일 00:00)
+        LocalDate monday = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
+        LocalDateTime startOfWeek = monday.atStartOfDay();
+        LocalDateTime startOfNextWeek = startOfWeek.plusDays(7);
+
+        // 월별 카드 조회 (페이징)
+        Page<DiaryPost> cardPage = diaryPostRepository.findByUserIdAndCreatedAtBetween(
+                currentUserId, startOfMonth, startOfNextMonth, pageable
+        );
+
+        // 주간 통계 조회 (비페이징)
+        List<DiaryPost> thisWeekPosts = diaryPostRepository.findByUserIdAndCreatedAtBetween(
+                currentUserId, startOfWeek, startOfNextWeek
+        );
+
+        // 집계 데이터 준비 (좋아요/댓글/내가 누른 글)
+        List<Long> postIds = cardPage.getContent().stream().map(DiaryPost::getId).toList();
+        Map<Long, Long> likeCnt = postIds.isEmpty() ? Map.of() : DiaryQueryMapper.toCountMap(diaryPostLikeRepository.countByPostIds(postIds));
+        Map<Long, Long> commentCnt = postIds.isEmpty() ? Map.of() : DiaryQueryMapper.toCountMap(diaryCommentRepository.countByPostIds(postIds));
+        Set<Long> likedSet = postIds.isEmpty() ? Set.of() : new HashSet<>(diaryPostLikeRepository.findPostIdsLikedByUser(postIds, currentUserId));
+
+        return MyDiaryAssembler.build(cardPage, thisWeekPosts, likedSet, likeCnt, commentCnt);
     }
 
     /**
-     * 친구 피드 (로그인)
+     * 친구 피드 (로그인) - 페이징
      * - 맞팔: FRIEND+PUBLIC, 단방향: PUBLIC
      */
     @Transactional(readOnly = true)
-    public List<DiaryPostCardRes> listFriendDiaries(Long currentUserId) {
+    public Page<DiaryPostCardRes> listFriendDiaries(Long currentUserId, Pageable pageable) {
         requireLogin(currentUserId);
 
         Set<Long> followingIds = followService.getFollowingUserIds(currentUserId);
-        if (followingIds.isEmpty()) return List.of();
-
         Set<Long> mutualIds = followService.getMutualUserIds(currentUserId);
         Set<Long> oneWayIds = new HashSet<>(followingIds);
         oneWayIds.removeAll(mutualIds);
 
-        List<DiaryPost> friendPosts = new ArrayList<>();
-        if (!mutualIds.isEmpty()) {
-            friendPosts.addAll(diaryPostRepository.findByAuthorsAndVisibilityOrderByCreatedAtDesc(
-                    mutualIds, List.of(Visibility.FRIEND, Visibility.PUBLIC)));
-        }
-        if (!oneWayIds.isEmpty()) {
-            friendPosts.addAll(diaryPostRepository.findByAuthorsAndVisibilityOrderByCreatedAtDesc(
-                    oneWayIds, List.of(Visibility.PUBLIC)));
-        }
-        if (friendPosts.isEmpty()) return List.of();
+        boolean hasMutual = !mutualIds.isEmpty();
+        boolean hasOneWay = !oneWayIds.isEmpty();
 
-        friendPosts.sort(Comparator.comparing(DiaryPost::getCreatedAt).reversed());
+        Collection<Long> mutualParam = hasMutual ? mutualIds : List.of(-1L);
+        Collection<Long> oneWayParam = hasOneWay ? oneWayIds : List.of(-1L);
 
-        List<Long> postIds = friendPosts.stream().map(DiaryPost::getId).toList();
+        Page<DiaryPost> page = diaryPostRepository.findFriendFeedPaged(
+                mutualParam,
+                List.of(Visibility.FRIEND, Visibility.PUBLIC),
+                oneWayParam,
+                Visibility.PUBLIC,
+                hasMutual,
+                hasOneWay,
+                pageable
+        );
+
+        if (page.isEmpty()) return Page.empty(pageable);
+
+        // 현재 페이지 집계 (좋아요/댓글/내가 누른 글)
+        List<Long> postIds = page.getContent().stream().map(DiaryPost::getId).toList();
         Map<Long, Long> commentCnt = DiaryQueryMapper.toCountMap(diaryPostRepository.countCommentsInPostIds(postIds));
         Map<Long, Long> likeCnt = DiaryQueryMapper.toCountMap(diaryPostLikeRepository.countByPostIds(postIds));
         Set<Long> likedSet = new HashSet<>(diaryPostLikeRepository.findPostIdsLikedByUser(postIds, currentUserId));
 
-        return DiaryCardAssembler.toCards(friendPosts, likedSet, likeCnt, commentCnt);
+        // DTO 변환
+        List<DiaryPostCardRes> cards = DiaryCardAssembler.toCards(page.getContent(), likedSet, likeCnt, commentCnt);
+        return new PageImpl<>(cards, pageable, page.getTotalElements());
     }
 
     /**
@@ -141,31 +176,34 @@ public class DiaryPostService {
      * - 맞팔: FRIEND+PUBLIC, 그 외: PUBLIC
      */
     @Transactional(readOnly = true)
-    public List<DiaryPostCardRes> listExploreFeed(Long currentUserId) {
+    public Page<DiaryPostCardRes> listExploreFeed(Long currentUserId, Pageable pageable) {
         requireLogin(currentUserId);
 
+        // 최근 7일 고정: [오늘-6일 00:00, 내일 00:00)
         LocalDate today = LocalDate.now();
-        LocalDateTime startAt = today.minusDays(6).atStartOfDay(); // 오늘 포함 7일
-        LocalDateTime endAt = today.plusDays(1).atStartOfDay();  // 내일 0시(미만)
+        LocalDateTime startAt = today.minusDays(6).atStartOfDay();
+        LocalDateTime endAt = today.plusDays(1).atStartOfDay();
 
         Set<Long> mutualIds = followService.getMutualUserIds(currentUserId);
 
-        List<DiaryPost> posts = mutualIds.isEmpty()
-                ? diaryPostRepository.findExploreFeedPublicOnlyInPeriod(
-                currentUserId, Visibility.PUBLIC, startAt, endAt)
-                : diaryPostRepository.findExploreFeedWithMutualsInPeriod(
+        Page<DiaryPost> page = mutualIds.isEmpty()
+                ? diaryPostRepository.findExploreFeedPublicOnlyInPeriodPaged(
+                currentUserId, Visibility.PUBLIC, startAt, endAt, pageable)
+                : diaryPostRepository.findExploreFeedWithMutualsInPeriodPaged(
                 currentUserId, mutualIds,
                 List.of(Visibility.FRIEND, Visibility.PUBLIC),
-                Visibility.PUBLIC, startAt, endAt);
+                Visibility.PUBLIC, startAt, endAt, pageable);
 
-        if (posts.isEmpty()) return List.of();
+        if (page.isEmpty()) return Page.empty(pageable);
 
-        List<Long> postIds = posts.stream().map(DiaryPost::getId).toList();
+        // 현재 페이지 집계
+        List<Long> postIds = page.getContent().stream().map(DiaryPost::getId).toList();
         Map<Long, Long> commentCnt = DiaryQueryMapper.toCountMap(diaryPostRepository.countCommentsInPostIds(postIds));
         Map<Long, Long> likeCnt = DiaryQueryMapper.toCountMap(diaryPostLikeRepository.countByPostIds(postIds));
         Set<Long> likedSet = new HashSet<>(diaryPostLikeRepository.findPostIdsLikedByUser(postIds, currentUserId));
 
-        return DiaryCardAssembler.toCards(posts, likedSet, likeCnt, commentCnt);
+        List<DiaryPostCardRes> cards = DiaryCardAssembler.toCards(page.getContent(), likedSet, likeCnt, commentCnt);
+        return new PageImpl<>(cards, pageable, page.getTotalElements());
     }
 
 
